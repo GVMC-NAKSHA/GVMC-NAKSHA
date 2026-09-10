@@ -1,0 +1,15 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "id": "4", "name": "Asilmetta" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [83.200, 17.685], [83.230, 17.685], [83.230, 17.710], [83.200, 17.710], [83.200, 17.685]
+        ]]
+      }
+    }
+  ]
+}

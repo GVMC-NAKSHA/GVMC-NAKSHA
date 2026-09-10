@@ -1,0 +1,15 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "id": "5", "name": "Dwaraka Nagar" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [83.190, 17.668], [83.220, 17.668], [83.220, 17.695], [83.190, 17.695], [83.190, 17.668]
+        ]]
+      }
+    }
+  ]
+}

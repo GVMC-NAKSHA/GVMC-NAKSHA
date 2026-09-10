@@ -1,0 +1,15 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "id": "2", "name": "Gopalapatnam" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [83.245, 17.748], [83.278, 17.748], [83.278, 17.778], [83.245, 17.778], [83.245, 17.748]
+        ]]
+      }
+    }
+  ]
+}

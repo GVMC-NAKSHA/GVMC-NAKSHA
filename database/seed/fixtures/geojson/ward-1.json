@@ -1,0 +1,15 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "id": "1", "name": "Seethammadhara" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [83.280, 17.715], [83.315, 17.715], [83.315, 17.745], [83.280, 17.745], [83.280, 17.715]
+        ]]
+      }
+    }
+  ]
+}

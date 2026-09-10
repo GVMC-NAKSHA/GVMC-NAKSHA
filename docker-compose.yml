@@ -1,0 +1,24 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    environment: { POSTGRES_DB: gvmcdb, POSTGRES_USER: gvmc, POSTGRES_PASSWORD: dev }
+    ports: ["5432:5432"]
+    volumes: ["./database/migrations:/docker-entrypoint-initdb.d"]
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+  api:
+    build: ./backend
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://gvmc:dev@db:5432/gvmcdb
+      REDIS_URL: redis://redis:6379
+    depends_on: [db, redis]
+    ports: ["3000:3000"]
+  worker:
+    build: ./worker
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://gvmc:dev@db:5432/gvmcdb
+      REDIS_URL: redis://redis:6379
+    depends_on: [db, redis]

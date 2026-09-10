@@ -1,0 +1,15 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "id": "3", "name": "Maddilapalem" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [83.270, 17.700], [83.302, 17.700], [83.302, 17.728], [83.270, 17.728], [83.270, 17.700]
+        ]]
+      }
+    }
+  ]
+}

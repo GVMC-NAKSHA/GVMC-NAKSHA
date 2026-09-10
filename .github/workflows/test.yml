@@ -1,0 +1,29 @@
+name: test
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    if: ${{ hashFiles('backend/package.json') != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - working-directory: ./backend
+        run: |
+          npm install
+          npm run build
+          npm test
+  worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gdal-bin libgdal-dev tesseract-ocr poppler-utils libgl1
+      - working-directory: ./worker
+        run: |
+          pip install --no-cache-dir -r requirements.txt pytest
+          pytest -q || [ $? -eq 5 ]   # exit 5 = no tests collected yet

@@ -1,0 +1,6 @@
+# repo-root .gitattributes — keep LF in the repo on Windows checkouts
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.tif binary
+*.pdf binary
