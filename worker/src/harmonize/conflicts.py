@@ -1,5 +1,8 @@
-import json
+import json, os
+import redis
 from db import cursor
+
+_r = redis.from_url(os.environ["REDIS_URL"])
 
 def _severity(match_score, attr_disagree_ratio, hard_geometry_disagreement):
     if match_score < 40 or hard_geometry_disagreement:
@@ -27,7 +30,8 @@ def detect_conflicts(job):
             a, b = r["a_props"] or {}, r["b_props"] or {}
             shared = set(a) & set(b)
             disagree = [k for k in shared if str(a[k]).strip().lower() != str(b[k]).strip().lower()]
-            geom_bad = (r["geometry_iou"] is not None and float(r["geometry_iou"]) < 0.30)
+            iou = float(r["geometry_iou"]) if r["geometry_iou"] is not None else None
+            geom_bad = (iou is not None and iou < 0.30)
             if not disagree and not geom_bad:
                 continue
             ctype = "both" if (disagree and geom_bad) else ("attribute_mismatch" if disagree else "geometry_mismatch")
@@ -36,7 +40,9 @@ def detect_conflicts(job):
                 INSERT INTO conflicts (ward_id, match_id, conflict_type, severity, detail, suggested_resolution)
                 VALUES (%s,%s,%s,%s,%s,%s)""",
                 (ward, r["id"], ctype, sev,
-                 json.dumps({"disagreeing_fields": disagree, "iou": r["geometry_iou"]}),
+                 json.dumps({"disagreeing_fields": disagree, "iou": iou}),
                  f"Reconcile {', '.join(disagree) or 'geometry'}; trust the higher-reliability source."))
             made += 1
-    print(f"[conflicts] ward {ward}: {made} created")
+    # B.10: (re)assemble the ward's golden record now that matches + conflicts are known.
+    _r.lpush("queue:ingest", json.dumps({"jobType": "ASSEMBLE_WARD", "wardId": ward}))
+    print(f"[conflicts] ward {ward}: {made} created; enqueued ASSEMBLE_WARD")

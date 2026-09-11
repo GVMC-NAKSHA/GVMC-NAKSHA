@@ -2,11 +2,26 @@
 -- IF NOT EXISTS statements are no-ops there. On a plain local Postgres
 -- (docker-compose `postgis/postgis`) they create a minimal shim so this
 -- migration — and local role testing — still works.
-CREATE SCHEMA IF NOT EXISTS auth;
-CREATE TABLE IF NOT EXISTS auth.users (
-  id    uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  email text
-);
+-- Note: IF NOT EXISTS still requires CREATE privilege on the schema before
+-- Postgres checks whether the object exists, and Supabase's `postgres` role
+-- doesn't have CREATE on the reserved `auth` schema — so catch that instead
+-- of relying on IF NOT EXISTS alone.
+DO $$
+BEGIN
+  CREATE SCHEMA IF NOT EXISTS auth;
+EXCEPTION WHEN insufficient_privilege THEN
+  NULL;
+END $$;
+
+DO $$
+BEGIN
+  CREATE TABLE IF NOT EXISTS auth.users (
+    id    uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    email text
+  );
+EXCEPTION WHEN insufficient_privilege THEN
+  NULL;
+END $$;
 
 -- Supabase manages auth.users; this mirrors role + display data for joins.
 CREATE TABLE profiles (

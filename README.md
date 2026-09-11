@@ -43,28 +43,64 @@ gvmc/
 
 See `final.md` §2 for the full tree and §13 for the sprint-by-sprint build order.
 
-## Getting started
+## Run the MVP locally (no keys required)
 
-1. Copy `.env.example` to `.env` and fill in the values (Supabase, R2, Upstash Redis, Groq —
-   see `final.md` §14 for what each var is for).
-2. Bring up the local stack:
+Postgres+PostGIS, Redis, the DB migrations, and an auth-bypass are all **bundled** — the demo
+runs with zero external accounts. Add keys later to switch on the real services.
 
-   ```bash
-   docker compose up
-   ```
+### 1. Start the backend + worker + db
 
-   This starts `db` (Postgres 16 + PostGIS), `redis`, `api` (NestJS), and `worker` (Python).
-3. Apply the database migrations and seed data in `database/migrations` and `database/seed`
-   (the `db` service auto-runs everything in `database/migrations` on first init via
-   `docker-entrypoint-initdb.d`; see `final.md` §15 for the full verification walkthrough,
-   including loading `database/seed/seed.sql`).
-4. Run the frontend separately for local development:
+```bash
+cp .env.example .env
+docker compose up --build
+```
 
-   ```bash
-   cd frontend && npm install && npm run dev
-   ```
+This brings up `db` (Postgres 16 + PostGIS), `redis`, a one-shot `migrate` job that applies
+`database/migrations/0001…0010` and seeds 5 wards, then `api` (:3000) and `worker`. Migrations
+are tracked in `schema_migrations`, so re-runs only apply new files.
 
-   The app serves on `http://localhost:3001` and talks to the API on `http://localhost:3000`.
+Check it: `curl localhost:3000/api/health` → `db` and `redis` are `"ok"` (`r2` shows `"down"`
+until you add R2 keys — expected).
 
-Deployment is automated via the workflows in `.github/workflows/` (`deploy-backend.yml`,
-`deploy-worker.yml`, `deploy-frontend.yml`) plus `test.yml` for CI — see `final.md` §12 and §18.
+### 2. Start the frontend
+
+```bash
+cd frontend
+cp .env.local.example .env.local     # paste your Google Maps JS API key for the basemap
+npm install
+npm run dev
+```
+
+The **map** uses Google Maps (`hybrid` satellite + labels) — set `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY`
+in `frontend/.env.local`. Without it the app still loads; the map panel just shows a hint.
+Everything else stays keyless. Open **http://localhost:3001** → `/login` → pick a role (`admin`) →
+officer dashboard. `/integration` is the PS-26013 view: assemble the golden record and export the
+harmonized cadastre.
+
+### 3. Turn on the real services (optional)
+
+Edit `.env`:
+
+| Set | To enable | Get it from |
+|---|---|---|
+| `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY` (in `frontend/.env.local`) | the map basemap | console.cloud.google.com → Maps JavaScript API + billing |
+| `AUTH_DEV_BYPASS=false` + `SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_URL`, `SUPABASE_ANON_KEY`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` | real sign-in (first user → admin) | supabase.com → project → Settings → API |
+| `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME` | uploading source files, exporting the cadastre to storage | Cloudflare → R2 → bucket + API token |
+| `GROQ_API_KEY` | live AI text instead of templated fallbacks | console.groq.com/keys |
+
+For real auth, put the matching `NEXT_PUBLIC_SUPABASE_*` values in `frontend/.env.local` too, then
+restart `npm run dev`.
+
+### End-to-end demo (Admin dashboard)
+
+1. **Upload source** — pick `cadastral` + Ward 4, choose a GeoJSON of parcel polygons, Upload.
+   Repeat for a `building_footprint` GeoJSON. (The browser PUTs straight to R2 via a presigned
+   URL, so add a CORS rule on the R2 bucket allowing `PUT` from `http://localhost:3001` —
+   R2 dashboard → bucket → Settings → CORS Policy.)
+2. **Harmonize ward 4** — runs matching → conflicts → auto-assembles the golden record.
+3. **Export cadastre (GeoJSON)** — opens a presigned download of the integrated parcel layer.
+
+> No `GROQ_API_KEY`? Everything above still works; AI replies are templated and schema-mapping
+> uses deterministic column-name matching. No `SUPABASE_*`? The API boots but you can't sign in.
+
+Deployment is automated via the workflows in `.github/workflows/` — see `final.md` §12 and §18.

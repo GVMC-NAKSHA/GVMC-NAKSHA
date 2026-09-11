@@ -8,21 +8,26 @@ export function TicketReview({ items }: { items: any[] }) {
 
   async function review(id: string, status: string) {
     await api(`/api/tickets/${id}/review`, { method: 'PATCH', body: JSON.stringify({ status }) });
-    setList((ts: any[]) => ts.filter(t => t.id !== id));
+    setList((ts: any[]) => ts.filter((t) => t.id !== id));
   }
 
   if (!list?.length) return <p className="muted">No open tickets.</p>;
   return (
     <table>
-      <thead><tr><th>ID</th><th>Ward</th><th>Category</th><th>Priority</th><th>Status</th><th></th></tr></thead>
+      <thead>
+        <tr><th>ID</th><th>Ward</th><th>House #</th><th>Description</th><th>Status</th><th></th></tr>
+      </thead>
       <tbody>
         {list.map((t: any) => (
           <tr key={t.id}>
-            <td>{t.id.slice(0, 8)}</td><td>{t.ward_id}</td><td>{t.category}</td>
-            <td>{t.priority}</td><td>{t.status}</td>
+            <td>{String(t.id).slice(0, 8)}</td>
+            <td>{t.ward_id}</td>
+            <td>{t.house_number}</td>
+            <td>{t.description}</td>
+            <td>{t.status}</td>
             <td className="row">
-              <button onClick={() => review(t.id, 'approved')}>Approve</button>
-              <button onClick={() => review(t.id, 'rejected')}>Reject</button>
+              <button onClick={() => review(t.id, 'under_review')}>Review</button>
+              <button onClick={() => review(t.id, 'resolved')}>Resolve</button>
             </td>
           </tr>
         ))}

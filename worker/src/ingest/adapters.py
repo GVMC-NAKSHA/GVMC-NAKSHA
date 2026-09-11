@@ -1,7 +1,7 @@
 import json
 import rasterio, fiona, shapefile, gpxpy
 from shapely.geometry import shape, mapping, box, Point
-from db import get_data_source, insert_source_feature, set_status
+from db import get_data_source, insert_source_feature, set_status, update_source_metadata
 from r2 import download
 from spatial.geo_transform import reproject_to_wgs84, detect_crs
 from spatial.topology import validate_and_fix
@@ -49,15 +49,21 @@ def normalize_source(job):
     try:
         adapter = ADAPTERS[job["type"]]
         count = 0
+        field_names = set()
         for rec, embedded_crs in adapter(path):
             crs = src["crs"] or embedded_crs or detect_crs(path)
             if not crs:
-                raise ValueError("no CRS: declare one on upload")
+                raise ValueError("no CRS: declare one on upload")   # only .shp / .tif without an embedded CRS
             geom = reproject_to_wgs84(rec["geometry"], crs)          # B.2
             geom, was_invalid = validate_and_fix(geom)               # B.4
-            insert_source_feature(src["id"], mapping(geom), rec["properties"], was_invalid)
+            props = rec["properties"] or {}
+            field_names.update(props.keys())
+            insert_source_feature(src["id"], mapping(geom), props, was_invalid)
             count += 1
+        # B.5 needs the attribute schema of *structured* sources — record it so schema_map.py
+        # has real "Dataset B fields" to map an OCR'd document against.
+        update_source_metadata(src["id"], {"fields": sorted(field_names), "feature_count": count})
         set_status(src["id"], "ready")
-        print(f"[normalize] {src['id']} -> {count} features")
+        print(f"[normalize] {src['id']} -> {count} features, {len(field_names)} fields")
     except Exception as e:                                           # noqa: BLE001
         set_status(src["id"], "failed", str(e)); raise

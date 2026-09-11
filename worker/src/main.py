@@ -5,13 +5,19 @@ from ocr.digitize import digitize
 from harmonize.match import match_ward
 from harmonize.conflicts import detect_conflicts
 from harmonize.schema_map import run_schema_map
+from harmonize.assemble import assemble_ward, export_harmonized
 
+# None of these modules build a Groq client at import time — schema_map.py and assemble.py
+# read GROQ_API_KEY lazily and fall back to deterministic behaviour when it is unset, so the
+# worker starts with only DATABASE_URL / REDIS_URL / R2_* set.
 HANDLERS = {
-    "NORMALIZE_SOURCE": normalize_source,
-    "DIGITIZE_SOURCE":  digitize,
-    "SCHEMA_MAP":       run_schema_map,
-    "HARMONIZE_WARD":   match_ward,
-    "DETECT_CONFLICTS": detect_conflicts,
+    "NORMALIZE_SOURCE":  normalize_source,
+    "DIGITIZE_SOURCE":   digitize,
+    "SCHEMA_MAP":        run_schema_map,
+    "HARMONIZE_WARD":    match_ward,
+    "DETECT_CONFLICTS":  detect_conflicts,
+    "ASSEMBLE_WARD":     assemble_ward,       # B.10 golden record
+    "EXPORT_HARMONIZED": export_harmonized,   # B.10 GeoPackage export
 }
 
 r = redis.from_url(os.environ["REDIS_URL"])

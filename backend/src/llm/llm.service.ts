@@ -1,8 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import Groq from 'groq-sdk';
 
-// ── Templated fallbacks (ported from pipeline/bedrock_client.py). Any Groq error
-//    returns one of these so an AI outage never 500s the API. ──
+// ── Templated fallbacks (ported from pipeline/bedrock_client.py). Any Groq error —
+//    or a missing GROQ_API_KEY — returns one of these so an AI outage never 500s the API. ──
 const FALLBACK = {
   explain: (p: any) =>
     `Satellite change-detection flagged this ${p.area_sqm ?? 'unknown'} sqm ${p.detection_type ?? 'structure'} ` +
@@ -28,8 +28,18 @@ const FALLBACK = {
 @Injectable()
 export class LlmService {
   private readonly log = new Logger(LlmService.name);
-  private readonly groq = new Groq({ apiKey: process.env.GROQ_API_KEY });   // server-side only
   private readonly model = 'llama-3.3-70b-versatile';
+
+  // Lazy — build the client only on first use, and only when a key is set. This keeps the
+  // API booting (and CI green) with no GROQ_API_KEY: every method below wraps chat() in
+  // try/catch and returns a templated FALLBACK, so a missing key degrades AI output to
+  // templates instead of crashing at module load.
+  private _groq?: Groq;
+  private get groq(): Groq {
+    if (!process.env.GROQ_API_KEY)
+      throw new Error('GROQ_API_KEY not set — using templated fallback');
+    return (this._groq ??= new Groq({ apiKey: process.env.GROQ_API_KEY }));   // server-side only
+  }
 
   private async chat(prompt: string, maxTokens = 400, temperature = 0.5): Promise<string> {
     const r = await this.groq.chat.completions.create({

@@ -1,24 +1,76 @@
+name: gvmc-naksha
+
+# Quick start:  cp .env.example .env   &&   docker compose up --build
+# Bundled Postgres+PostGIS and Redis run with zero config. Paste Supabase / R2 / Groq keys
+# into .env to enable auth, object storage and live AI (all optional to boot).
+
 services:
   db:
     image: postgis/postgis:16-3.4
-    environment: { POSTGRES_DB: gvmcdb, POSTGRES_USER: gvmc, POSTGRES_PASSWORD: dev }
+    environment:
+      POSTGRES_DB: gvmcdb
+      POSTGRES_USER: gvmc
+      POSTGRES_PASSWORD: dev
     ports: ["5432:5432"]
-    volumes: ["./database/migrations:/docker-entrypoint-initdb.d"]
+    volumes: ["gvmc_pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gvmc -d gvmcdb"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
   redis:
     image: redis:7-alpine
     ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # Applies database/migrations/*.sql (idempotently) then seeds once. Runs on every `up`.
+  migrate:
+    image: postgis/postgis:16-3.4      # reused for its psql client
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://gvmc:dev@db:5432/gvmcdb}
+    volumes:
+      - ./database/migrations:/migrations:ro
+      - ./database/seed:/seed:ro
+      - ./database/migrate.sh:/migrate.sh:ro
+    entrypoint: ["sh", "/migrate.sh"]
+    restart: "no"
+
   api:
     build: ./backend
     env_file: .env
     environment:
-      DATABASE_URL: postgres://gvmc:dev@db:5432/gvmcdb
-      REDIS_URL: redis://redis:6379
-    depends_on: [db, redis]
+      DATABASE_URL: ${DATABASE_URL:-postgres://gvmc:dev@db:5432/gvmcdb}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      # No Supabase keys? Leave this true and the API runs open with role from `x-dev-role`.
+      # Set AUTH_DEV_BYPASS=false in .env once SUPABASE_* are filled in.
+      AUTH_DEV_BYPASS: ${AUTH_DEV_BYPASS:-true}
+      PROFILES_SOURCE: ${PROFILES_SOURCE:-local}
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:3001}
+      PORT: "3000"
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
     ports: ["3000:3000"]
+
   worker:
     build: ./worker
     env_file: .env
     environment:
-      DATABASE_URL: postgres://gvmc:dev@db:5432/gvmcdb
-      REDIS_URL: redis://redis:6379
-    depends_on: [db, redis]
+      DATABASE_URL: ${DATABASE_URL:-postgres://gvmc:dev@db:5432/gvmcdb}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      PYTHONUNBUFFERED: "1"
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+
+volumes:
+  gvmc_pgdata:

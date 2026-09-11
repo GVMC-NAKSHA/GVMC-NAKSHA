@@ -20,6 +20,7 @@ import { SourcesModule } from './sources/sources.module';
 import { HarmonizationModule } from './harmonization/harmonization.module';
 import { ConflictsModule } from './conflicts/conflicts.module';
 import { ConfidenceModule } from './confidence/confidence.module';
+import { HarmonizedModule } from './harmonized/harmonized.module';
 import { DroneModule } from './drone/drone.module';
 
 @Module({
@@ -28,7 +29,8 @@ import { DroneModule } from './drone/drone.module';
     InfraModule, HealthModule, AuthModule, LlmModule,
     WardsModule, PropertiesModule, StatsModule, VerifyModule, ExportModule,
     AlertsModule, BriefModule, AdminModule, ChatModule, TicketsModule,
-    SourcesModule, HarmonizationModule, ConflictsModule, ConfidenceModule, DroneModule,
+    SourcesModule, HarmonizationModule, ConflictsModule, ConfidenceModule,
+    HarmonizedModule, DroneModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: AuthGuard }],
 })

@@ -1,12 +1,13 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { Pool } from 'pg';
 import { PG } from '../infra/infra.module';
-import { one } from '../infra/pg.provider';
+import { one, q } from '../infra/pg.provider';
 import { LlmService } from '../llm/llm.service';
+import { Brevo, escapeHtml } from '../infra/email.client';
 
 @Injectable()
 export class AlertsService {
-  constructor(@Inject(PG) private pg: Pool, private llm: LlmService) {}
+  constructor(@Inject(PG) private pg: Pool, private llm: LlmService, private email: Brevo) {}
 
   async generateAndStore(wardId: string) {
     const wardData = await one(this.pg, `
@@ -25,6 +26,18 @@ export class AlertsService {
     const row = await one(this.pg,
       `INSERT INTO alerts (ward_id, severity, text, score) VALUES ($1,$2,$3,$4) RETURNING *`,
       [wardId, sev, text, score]);
+    if (sev === 'danger') await this.notifyHighSeverity(wardData.ward_id, wardData.ward_name, text);
     return row;
+  }
+
+  // ── HIGH-severity alerts get emailed to officials/admins scoped to this ward ──
+  private async notifyHighSeverity(wardId: string, wardName: string, text: string) {
+    const recipients = await q<{ email: string }>(this.pg, `
+      SELECT email FROM profiles
+      WHERE role IN ('official','admin') AND email IS NOT NULL
+        AND (ward_scope = '{}' OR $1 = ANY(ward_scope))`, [wardId]);
+    if (!recipients.length) return;
+    await this.email.send(recipients.map(r => r.email), `HIGH severity alert — Ward ${wardId} (${wardName})`,
+      `<p>${escapeHtml(text)}</p>`);
   }
 }

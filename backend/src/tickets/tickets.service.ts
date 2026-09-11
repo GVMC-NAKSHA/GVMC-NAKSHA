@@ -4,25 +4,26 @@ import * as crypto from 'crypto';
 import { PG } from '../infra/infra.module';
 import { q, one } from '../infra/pg.provider';
 import { R2 } from '../infra/r2.client';
+import { Brevo, escapeHtml } from '../infra/email.client';
 import { CreateTicketDto, ListTicketsDto, ReviewTicketDto, PhotoUploadDto } from './dto';
 
 @Injectable()
 export class TicketsService {
   private static readonly REVIEW = new Set(['under_review', 'resolved']);
-  constructor(@Inject(PG) private pg: Pool, private r2: R2) {}
+  constructor(@Inject(PG) private pg: Pool, private r2: R2, private email: Brevo) {}
 
-  async create(dto: CreateTicketDto) {
+  async create(dto: CreateTicketDto, createdByEmail?: string) {
     for (const f of ['wardId', 'houseNumber', 'description'] as const)
       if (!dto[f]?.trim()) throw new BadRequestException(`${f} is required`);
     if (!await one(this.pg, `SELECT id FROM wards WHERE id = $1`, [dto.wardId]))
       throw new NotFoundException('Ward not found');
     const row = await one(this.pg, `
       INSERT INTO tickets (ward_id, property_id, parcel_id, house_number, description,
-                           tax_pending, gnss_lat, gnss_lng, gnss_accuracy_m, photo_r2_key)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id, status`,
+                           tax_pending, gnss_lat, gnss_lng, gnss_accuracy_m, photo_r2_key, created_by_email)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id, status`,
       [dto.wardId, dto.propertyId ?? null, dto.parcelId ?? null, dto.houseNumber, dto.description,
        dto.taxPending ?? null, dto.gnssLat ?? null, dto.gnssLng ?? null, dto.gnssAccuracyM ?? null,
-       dto.photoR2Key ?? null]);
+       dto.photoR2Key ?? null, createdByEmail ?? null]);
     return row;
   }
 
@@ -51,6 +52,14 @@ export class TicketsService {
       `UPDATE tickets SET status=$1, supervisor_notes=$2, reviewed_by=$3, reviewed_at=now(), updated_at=now()
        WHERE id=$4`, [dto.status, dto.supervisorNotes ?? '', dto.reviewedBy ?? 'supervisor', id]);
     if (!rowCount) throw new NotFoundException('Ticket not found');
+    const ticket = await one<{ created_by_email: string | null; house_number: string }>(this.pg,
+      `SELECT created_by_email, house_number FROM tickets WHERE id = $1`, [id]);
+    if (ticket?.created_by_email) {
+      const house = escapeHtml(ticket.house_number);
+      await this.email.send([ticket.created_by_email], `Ticket update: ${ticket.house_number} — ${dto.status}`,
+        `<p>Your ticket for <b>${house}</b> was marked <b>${dto.status}</b>` +
+        (dto.supervisorNotes ? ` with the note: "${escapeHtml(dto.supervisorNotes)}"` : '') + `.</p>`);
+    }
     return { status: dto.status };
   }
 

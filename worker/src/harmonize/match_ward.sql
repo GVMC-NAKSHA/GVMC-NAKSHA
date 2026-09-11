@@ -15,6 +15,7 @@ WITH pairs AS (
   JOIN data_sources   db ON db.id = b.source_id
   WHERE da.ward_id = %(ward)s AND db.ward_id = %(ward)s AND da.type <> db.type
 )
-SELECT *, round(100 * COALESCE(iou, GREATEST(0, 1 - dist_m / 25.0)), 2) AS match_score
+SELECT *,
+       round((100 * COALESCE(iou, GREATEST(0, 1 - dist_m / 25.0)))::numeric, 2) AS match_score
 FROM pairs
 WHERE COALESCE(iou, 0) >= 0.30 OR COALESCE(dist_m, 999) <= 25;

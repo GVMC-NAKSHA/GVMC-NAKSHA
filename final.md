@@ -2150,7 +2150,8 @@ WITH pairs AS (
   JOIN data_sources   db ON db.id = b.source_id
   WHERE da.ward_id = %(ward)s AND db.ward_id = %(ward)s AND da.type <> db.type
 )
-SELECT *, round(100 * COALESCE(iou, GREATEST(0, 1 - dist_m / 25.0)), 2) AS match_score
+SELECT *,
+       round((100 * COALESCE(iou, GREATEST(0, 1 - dist_m / 25.0)))::numeric, 2) AS match_score
 FROM pairs
 WHERE COALESCE(iou, 0) >= 0.30 OR COALESCE(dist_m, 999) <= 25;
 ```
@@ -2410,7 +2411,9 @@ export class HarmonizedService {
     return row;
   }
 
-  // synchronous GeoJSON build → R2 → presigned URL (same pattern as ExportService.exportCsv)
+  // Synchronous GeoJSON build. With R2 configured → upload + presigned URL (same pattern as
+  // ExportService.exportCsv); without R2 → return the FeatureCollection inline so export
+  // still works keyless.
   async exportGeojson(wardId: string) {
     const rows = await q(this.pg, `
       SELECT id, ST_AsGeoJSON(geom)::json AS geometry, attributes, attribute_provenance,
@@ -2421,12 +2424,17 @@ export class HarmonizedService {
       features: rows.map(r => ({ type: 'Feature', id: r.id, geometry: r.geometry,
         properties: { ...r.attributes, _provenance: r.attribute_provenance,
                       _confidence: r.confidence, _conflict_count: r.conflict_count } })) };
-    const key = `exports/harmonized/${wardId}_${new Date().toISOString().replace(/[:.]/g,'').slice(0,15)}.geojson`;
-    await this.r2.putObject(key, JSON.stringify(fc), 'application/geo+json');
-    await this.pg.query(
-      `INSERT INTO harmonized_exports (ward_id, format, r2_key, feature_count, status)
-       VALUES ($1,'geojson',$2,$3,'ready')`, [wardId, key, rows.length]);
-    return { presigned_url: await this.r2.presignGet(key), feature_count: rows.length, format: 'geojson' };
+    if (!process.env.R2_BUCKET_NAME) return { feature_count: rows.length, format: 'geojson', geojson: fc };
+    try {
+      const key = `exports/harmonized/${wardId}_${new Date().toISOString().replace(/[:.]/g,'').slice(0,15)}.geojson`;
+      await this.r2.putObject(key, JSON.stringify(fc), 'application/geo+json');
+      await this.pg.query(
+        `INSERT INTO harmonized_exports (ward_id, format, r2_key, feature_count, status)
+         VALUES ($1,'geojson',$2,$3,'ready')`, [wardId, key, rows.length]);
+      return { presigned_url: await this.r2.presignGet(key), feature_count: rows.length, format: 'geojson' };
+    } catch {
+      return { feature_count: rows.length, format: 'geojson', geojson: fc };
+    }
   }
 
   async enqueueGpkgExport(wardId: string) {
@@ -2591,36 +2599,65 @@ export function IntegrationView({ ward, conflicts, matches, features }: Props) {
 }
 ```
 
-### `frontend/components/MapCanvas.tsx` — MapLibre GL (no API key needed)
+### `frontend/components/MapCanvas.tsx` — Google Maps JS API (`hybrid` satellite + labels)
+
+> Needs `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY` (Maps JavaScript API + a Google billing account) — a
+> deliberate step outside the $0 stack, chosen for satellite/hybrid imagery on cadastral work.
+> Swap `@googlemaps/js-api-loader` back to `maplibre-gl` + a free vector style for the keyless
+> alternative. The GeoJSON overlays (parcels, matched geometries) are identical either way.
+> `colorForMatch` / `matches` are optional with defaults so Server Components can render
+> `<MapCanvas>` without passing a function across the server/client boundary.
 
 ```tsx
 'use client';
 import { useEffect, useRef } from 'react';
-import maplibregl from 'maplibre-gl';
-import 'maplibre-gl/dist/maplibre-gl.css';
+import { Loader } from '@googlemaps/js-api-loader';
 
-export function MapCanvas({ featureCollection, matches, colorForMatch }: Props) {
+const loader = new Loader({ apiKey: process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY ?? '', version: 'weekly' });
+
+export function MapCanvas({ featureCollection, matches = [], colorForMatch = () => '#3388ff' }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    const map = new maplibregl.Map({
-      container: ref.current!,
-      style: process.env.NEXT_PUBLIC_MAP_STYLE_URL ?? 'https://demotiles.maplibre.org/style.json',
-      center: [83.30, 17.72], zoom: 12,
+    let cancelled = false;
+    let map: google.maps.Map | undefined;
+    let matchLayer: google.maps.Data | undefined;
+
+    loader.importLibrary('maps').then(({ Map }) => {
+      if (cancelled || !ref.current) return;
+      map = new Map(ref.current, {
+        center: { lat: 17.72, lng: 83.3 }, zoom: 13, mapTypeId: 'hybrid',
+        streetViewControl: false, fullscreenControl: false,
+      });
+      if (featureCollection?.features?.length) map.data.addGeoJson(featureCollection);
+      map.data.setStyle({ fillColor: '#3388ff', fillOpacity: 0.18, strokeColor: '#e6e9ee', strokeWeight: 1 });
+
+      matchLayer = new google.maps.Data({ map });
+      (matches ?? []).filter((m: any) => m.feature_a_geom).forEach((m: any) =>
+        matchLayer!.addGeoJson({ type: 'Feature', geometry: m.feature_a_geom,
+          properties: { color: colorForMatch(m), score: m.match_score } }));
+      matchLayer.setStyle((f) => ({
+        fillColor: (f.getProperty('color') as string) || '#3388ff', fillOpacity: 0.55,
+        strokeColor: '#111', strokeWeight: 1,
+      }));
+
+      const bounds = new google.maps.LatLngBounds(); let has = false;
+      const extend = (l: google.maps.Data) =>
+        l.forEach((f) => f.getGeometry()?.forEachLatLng((ll) => { bounds.extend(ll); has = true; }));
+      extend(map.data); extend(matchLayer);
+      if (has) map.fitBounds(bounds, 40);
+    }).catch((e) => {
+      if (ref.current) ref.current.innerHTML =
+        `<div style="padding:16px;color:#9aa4b2">Map unavailable: ${e?.message ?? e}. ` +
+        `Set NEXT_PUBLIC_GOOGLE_MAPS_API_KEY in frontend/.env.local.</div>`;
     });
-    map.on('load', () => {
-      map.addSource('features', { type: 'geojson', data: featureCollection });
-      map.addLayer({ id: 'poly', type: 'fill', source: 'features',
-        paint: { 'fill-color': '#3388ff', 'fill-opacity': 0.25, 'fill-outline-color': '#1a1a1a' } });
-      map.addSource('matches', { type: 'geojson',
-        data: { type: 'FeatureCollection', features: matches.map((m: any) => ({
-          type: 'Feature', geometry: m.feature_a_geom,
-          properties: { color: colorForMatch(m), score: m.match_score } })) } });
-      map.addLayer({ id: 'match-fill', type: 'fill', source: 'matches',
-        paint: { 'fill-color': ['get', 'color'], 'fill-opacity': 0.55 } });
-    });
-    return () => map.remove();
+
+    return () => {
+      cancelled = true;
+      if (map) google.maps.event.clearInstanceListeners(map);
+      if (matchLayer) matchLayer.setMap(null);
+    };
   }, [featureCollection, matches]);
-  return <div ref={ref} style={{ position: 'absolute', inset: 0 }} />;
+  return <div ref={ref} style={{ position: 'absolute', inset: 0, background: '#0f1216' }} />;
 }
 ```
 
@@ -3229,7 +3266,8 @@ def detect_conflicts(job):
             a, b = r["a_props"] or {}, r["b_props"] or {}
             shared = set(a) & set(b)
             disagree = [k for k in shared if str(a[k]).strip().lower() != str(b[k]).strip().lower()]
-            geom_bad = (r["geometry_iou"] is not None and float(r["geometry_iou"]) < 0.30)
+            iou = float(r["geometry_iou"]) if r["geometry_iou"] is not None else None
+            geom_bad = (iou is not None and iou < 0.30)
             if not disagree and not geom_bad:
                 continue
             ctype = "both" if (disagree and geom_bad) else ("attribute_mismatch" if disagree else "geometry_mismatch")
@@ -3238,7 +3276,7 @@ def detect_conflicts(job):
                 INSERT INTO conflicts (ward_id, match_id, conflict_type, severity, detail, suggested_resolution)
                 VALUES (%s,%s,%s,%s,%s,%s)""",
                 (ward, r["id"], ctype, sev,
-                 json.dumps({"disagreeing_fields": disagree, "iou": r["geometry_iou"]}),
+                 json.dumps({"disagreeing_fields": disagree, "iou": iou}),
                  f"Reconcile {', '.join(disagree) or 'geometry'}; trust the higher-reliability source."))
             made += 1
     # B.10: (re)assemble the ward's golden record now that matches + conflicts are known.
@@ -3369,10 +3407,11 @@ def assemble_ward(job):
         for c in clusters.values():
             fids = list(c["features"])
             cur.execute("""
-                SELECT sf.id, ds.type, ST_GeometryType(sf.geom) AS gtype,
+                SELECT sf.id::text AS id, sf.source_id::text AS source_id, ds.type,
+                       ST_GeometryType(sf.geom) AS gtype,
                        ST_AsGeoJSON(ST_Multi(sf.geom))::json AS geojson, sf.properties
                 FROM source_features sf JOIN data_sources ds ON ds.id = sf.source_id
-                WHERE sf.id = ANY(%s)""", (fids,))
+                WHERE sf.id = ANY(%s::uuid[])""", (fids,))
             members = sorted(cur.fetchall(), key=lambda r: SOURCE_RELIABILITY.get(r["type"], 0.5), reverse=True)
             poly = next((r for r in members if "Polygon" in (r["gtype"] or "")), None)
             if not poly:
@@ -3386,7 +3425,7 @@ def assemble_ward(job):
                         attrs[key] = v; prov[key] = r["type"]
 
             cur.execute("""SELECT count(*) AS n FROM conflicts
-                           WHERE match_id = ANY(%s) AND status <> 'resolved'""", (c["matches"],))
+                           WHERE match_id = ANY(%s::uuid[]) AND status <> 'resolved'""", (c["matches"],))
             conflict_count = cur.fetchone()["n"]
             confidence = round(sum(c["scores"]) / len(c["scores"]) / 100, 4) if c["scores"] else None
 
@@ -3394,8 +3433,9 @@ def assemble_ward(job):
                 INSERT INTO harmonized_parcels
                   (ward_id, geom, geom_source_id, geom_source_type, attributes, attribute_provenance,
                    member_feature_ids, match_ids, confidence, conflict_count)
-                VALUES (%s, ST_SetSRID(ST_GeomFromGeoJSON(%s),4326), %s, %s, %s, %s, %s, %s, %s, %s)""",
-                (ward, json.dumps(poly["geojson"]), poly["id"], poly["type"],
+                VALUES (%s, ST_SetSRID(ST_GeomFromGeoJSON(%s),4326), %s::uuid, %s, %s, %s,
+                        %s::uuid[], %s::uuid[], %s, %s)""",
+                (ward, json.dumps(poly["geojson"]), poly["source_id"], poly["type"],
                  json.dumps(attrs), json.dumps(prov), fids, c["matches"], confidence, conflict_count))
             made += 1
     print(f"[assemble] ward {ward}: {made} harmonized parcels")
@@ -3740,14 +3780,15 @@ test
   "private": true,
   "scripts": { "dev": "next dev -p 3001", "build": "next build", "start": "next start" },
   "dependencies": {
+    "@googlemaps/js-api-loader": "^1.16.8",
     "@supabase/ssr": "^0.5.1",
     "@supabase/supabase-js": "^2.45.4",
-    "maplibre-gl": "^4.7.1",
     "next": "^14.2.13",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@types/google.maps": "^3.58.1",
     "@types/node": "^20.16.5",
     "@types/react": "^18.3.8",
     "typescript": "^5.6.2"
@@ -3841,7 +3882,7 @@ venv/
 19. `alerts`/`brief` modules wired to `LlmService`.
 
 **Sprint 5 — Frontend + security**
-20. Next.js `/integration` view (MapLibre + `ConflictPanel` + `ConfidenceCard`) + a harmonized-parcels
+20. Next.js `/integration` view (Google Maps + `ConflictPanel` + `ConfidenceCard`) + a harmonized-parcels
     layer / export button on the `admin` page.
 21. Cloudflare WAF + rate limits on `/chat` `/sources/upload` `/harmonization/*` `/harmonized/*` `/properties/*/explain`.
 22. Wazuh host (existing laptop/VM — **not** a paid VM); ship app + Supabase + Cloudflare logs.
@@ -3860,15 +3901,18 @@ add `tickets` + `sources` + `conflicts` route coverage to the backend test suite
 
 | Var / service | Used by | Purpose | Secret? |
 |---|---|---|---|
-| `DATABASE_URL` | NestJS `pg` pool, worker `psycopg2` | Supabase Postgres/PostGIS DSN | ✅ |
-| `SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_URL` | auth guard, frontend | project URL | public-ish |
+| `AUTH_DEV_BYPASS` | `AuthGuard` | `true` (docker-compose default) → no Supabase needed; role from the `x-dev-role` header (frontend `/login` role picker). Set `false` for real auth. **Never set in a deployed env.** | config |
+| `PROFILES_SOURCE` | `AuthGuard` | when bypass is off: `local` (self-provision `profiles` in the bundled Postgres; first user → admin) or `supabase` | config |
+| `R2_ENDPOINT` | `R2` client, worker `r2.py` | optional S3-compatible endpoint override (MinIO / LocalStack); unset → Cloudflare R2 | config |
+| `DATABASE_URL` | NestJS `pg` pool, worker `psycopg2` | Postgres/PostGIS DSN — **blank → bundled `db` container** | ✅ (when set) |
+| `SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_URL` | auth guard, frontend | project URL (only when `AUTH_DEV_BYPASS=false`) | public-ish |
 | `SUPABASE_ANON_KEY` / `NEXT_PUBLIC_SUPABASE_ANON_KEY` | frontend | client auth | public |
 | `SUPABASE_SERVICE_ROLE_KEY` | NestJS only | verify JWTs, admin ops, RLS bypass | ✅ **never in browser** |
 | `GROQ_API_KEY` | `LlmService`, worker `schema_map.py` | `llama-3.3-70b-versatile` for chat/explain/brief/alert/schema-map. **Optional** — absent, the API still boots and the worker still starts; those features return templated fallbacks / deterministic name-matching until it is set | ✅ server-side (when set) |
 | `R2_ACCOUNT_ID` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` / `R2_BUCKET_NAME` | NestJS `R2`, worker `r2.py` | Cloudflare R2 (S3-compatible) | ✅ |
 | `REDIS_URL` | NestJS `Queue`, worker `main.py` | Upstash Redis job queue | ✅ |
 | `NEXT_PUBLIC_API_URL` / `API_URL` | frontend | backend REST base URL | public |
-| `NEXT_PUBLIC_MAP_STYLE_URL` | frontend `MapCanvas` | MapLibre style JSON (free; no key) | public |
+| `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY` | frontend `MapCanvas` | Google Maps JS API basemap (`hybrid`). In `frontend/.env.local`. Absent → map panel shows a hint, app still runs | public (restrict by HTTP referrer) |
 | `FRONTEND_ORIGIN` | NestJS CORS | allowed origins | config |
 | `RESEND_API_KEY` / `BREVO_API_KEY` | notifications | email alerts (SNS replacement) | ✅ |
 | `WAZUH_HOST` | log shipper | SIEM ingest | infra |
@@ -3887,10 +3931,16 @@ secrets, Vercel env vars, Supabase config.
 
 ## 15. Verification (end-to-end)
 
-1. `cp .env.example .env` (leave `GROQ_API_KEY` blank to verify graceful degradation), then
-   `docker compose up` — `db` (postgis 16), `redis`, `api`, `worker`. Confirm `SELECT postgis_version();`
-   and that migrations `0001`–`0010` applied clean. `curl localhost:3000/api/health` → `db/redis/r2 ok`.
-   **The API must boot and the worker log `[worker] up` with no `GROQ_API_KEY`.**
+1. `cp .env.example .env` (leave everything blank), then `docker compose up --build`. The stack
+   is turnkey with **zero keys**: bundled `db` (postgis 16) + `redis`, a one-shot `migrate` service
+   that applies `0001`–`0010` + seeds (5 wards, ~25 demo properties, and `demo_sources.sql` — two
+   overlapping multi-source datasets for ward 4), then `api` + `worker`. `AUTH_DEV_BYPASS=true`
+   means no Supabase is needed. `curl localhost:3000/api/health` → `db`/`redis` `ok`
+   (`r2` `down` until keys added). Worker logs `[worker] up` with no `GROQ_API_KEY`.
+   Then: `POST /api/harmonization/run?wardId=4` (header `x-dev-role: admin`) →
+   `[match] 4 matches` → `[conflicts] 4 created` → `[assemble] 4 harmonized parcels`;
+   `GET /api/harmonized/export?wardId=4&format=geojson` returns the merged, provenance-tagged
+   FeatureCollection inline (no R2 needed).
 2. `psql "$DATABASE_URL" -f database/seed/seed.sql` — 5 wards + admin config.
 3. **Synthetic multi-source set**: a few cadastral polygons + building-footprint polygons with
    deliberate overlaps/gaps + 2–3 GNSS points (plain GeoJSON, no `crs` member), uploaded via B.1.
@@ -3955,7 +4005,7 @@ GNSS/CORS → `point_adapter`. **Caveat:** GeoTIFFs currently land as a single b
 ### Suggested technologies
 
 AI/ML → B.5 mapping + B.7 scoring (+ roadmap learned matcher) · GeoAI → B.3 candidate generation
-(+ roadmap CV extraction) · GIS & Web-GIS → Next.js `/integration` (MapLibre) · Spatial Databases →
+(+ roadmap CV extraction) · GIS & Web-GIS → Next.js `/integration` (Google Maps) · Spatial Databases →
 **Supabase PostGIS** · ETL Automation → B.1 NestJS ingest + Python worker (upload → adapter →
 reproject → topology → persist → match → assemble) · Computer Vision → **B.9 Tesseract** (+ roadmap
 imagery segmentation) · Cloud Computing → **Vercel + Supabase + R2 + Upstash** (zero AWS) · Spatial
@@ -4069,7 +4119,7 @@ first run publishes `ghcr.io/GVMC-NAKSHA/gvmc-backend` and `…/gvmc-worker`. Fr
 ### 18.6 — Deploy targets
 
 - **Vercel:** import `GVMC-NAKSHA/gvmc`, **Root Directory = `frontend/`**, set `NEXT_PUBLIC_API_URL`,
-  `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_MAP_STYLE_URL`.
+  `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY`.
 - **API + worker host:** any SSH box with Docker; put `docker-compose.yml` at `/opt/gvmc/` and
   set the `DEPLOY_*` secrets. The workflows `docker pull` + `docker compose up -d`.
 
